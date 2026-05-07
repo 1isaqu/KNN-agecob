@@ -295,6 +295,35 @@ O modelo 3D é **significativamente pior** (p=0.0001, +13.4% MAE). 67% das célu
 
 **Conclusão:** `dia_semana` não deve ser adicionado ao lookup com o dataset atual. Revisar quando houver ≥ 3 anos de histórico por faixa (~750+ dias).
 
+### 5.3 Janela Abril — modelo sem `faixa_batimento`
+
+**Dataset:** `dia >= 2026-04-07` (23 dias, 480 linhas). Split: 17 treino / 6 holdout.
+
+**Hipótese:** na janela de 23 dias com ciclo de batimento incompleto (batimento 29/04 ainda ativo), `faixa_batimento` adiciona ruído. Mediana sem faixa usa ~3× mais observações por célula → mais estável.
+
+**Baseline (3 faixas, janela abril):** MAE 16.03, MAPE 39.5%
+
+| Faixa (baseline) | MAE | n |
+|---|---|---|
+| absorcao | 27.07 | 27 |
+| basal | 8.59 | 57 |
+| pos_batimento | 19.74 | 34 |
+
+**Test A — Phase 1 sem faixa** (`hora → mediana proporcao`):
+
+| Métrica | Baseline | Test A | Delta |
+|---|---|---|---|
+| MAE global | 16.03 | **13.36** | **−2.67 (−16.6%)** |
+| N obs | 118 | 118 | — |
+
+Test A melhora em 9 de 12 horas. Maior ganho nas horas iniciais (8h: −16.74, 10h: −6.15). Leve piora em 16h (+0.97).
+
+**Test B — KNN 2D `[hora_norm, acum_norm]`:** MAE 77.36 (+382%). Catastrófico — sem `dias_desde_batimento`, vizinhos por `(hora, acum)` têm `total_dia` completamente diferente. Descartado.
+
+**Conclusão — janela abril:** `faixa_batimento` é ruído com < 30 dias e ciclo incompleto. Test A promovido para a janela abril: lookup `hora → mediana proporcao`, MAE 13.36 vs threshold 15.23.
+
+**Regra de chaveamento:** usar lookup sem faixa quando `dias_em_janela < 30` ou quando o batimento mais recente tem < 16 dias (ciclo pos+absorcao não completo). Retornar ao modelo com 3 faixas quando a janela crescer.
+
 ---
 
 ## 6. Escolhas Técnicas
@@ -387,3 +416,4 @@ Entra apenas se KNN for promovido e seu MAE ainda não satisfizer. Walk-forward 
 | `knn_phase2.py` | `acordos_banda` | Seleção de k (walk-forward CV) + avaliação KNN Model A |
 | `knn_modelB_total_dia.py` | `total_dia` | KNN v1 com hora como filtro — descartado (MAE 20.06) |
 | `knn_modelB_v2.py` | `total_dia` | KNN v2 com hora como feature 3D — descartado (MAE 14.93) |
+| `teste_sem_faixa_abril.py` | `total_dia` | Janela abril: Test A (sem faixa, MAE 13.36 ✅) · Test B (KNN 2D, descartado) |
