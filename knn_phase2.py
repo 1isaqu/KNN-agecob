@@ -9,6 +9,21 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.neighbors import KNeighborsRegressor
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_absolute_error
+from datetime import datetime
+
+
+def dia_em_andamento() -> bool:
+    """
+    Returns True if the current moment is within Agecob's operational hours.
+    Operational hours: Monday-Friday, 08:00-19:30.
+    Outside these hours the projection endpoint should not compute new forecasts.
+    """
+    agora = datetime.now()
+    if agora.weekday() >= 5:          # Saturday=5, Sunday=6
+        return False
+    hora_decimal = agora.hour + agora.minute / 60
+    return 8.0 <= hora_decimal < 19.5
+
 
 # ── STEP 1: DATA PREPARATION ──────────────────────────────────────────────
 print('=' * 62)
