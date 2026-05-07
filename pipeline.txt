@@ -1,0 +1,317 @@
+# Protocolo ML — Ritmo do Dia (v3)
+# Documento de implementação — Claude Code ready
+
+---
+
+## O QUE É ISSO
+
+Feature nova no `Index.tsx` (resumo do dia operacional).
+
+O gestor quer saber, a cada hora, se a operação está no ritmo esperado.
+A tríade **esperado / real / delta** é o produto. Os modelos de ML melhoram
+a qualidade do "esperado" ao longo do tempo — sem mudar a interface.
+
+```
+Banda 10-11h:  esperado=4 · real=1 · delta=−3  → investigar
+Banda 13-14h:  esperado=5 · real=7 · delta=+2  → acima do ritmo
+```
+
+Esta tríade É o xAI do modelo: o gestor vê o raciocínio, não uma caixa preta.
+
+---
+
+## CONTEXTO DE NEGÓCIO
+
+- Empresa: Agecob — cobrança de crédito (CONSUMER e AUTOS)
+- Sistema fonte: COBweb (SQL Server, dois bancos: COBwebRCBCONSUMER e COBwebRCBAUTOS)
+- Acordo válido: `ID_REC_STATUS IN (1, 3, 12)`, `PARCELA = 0`
+- Batimento: evento de entrada massiva de clientes novos (`QTD_NV_CLI > 10.000` em `CARGA_LOTE`)
+- Faixa de batimento:
+  - `pos_batimento`: 0–5 dias desde último batimento
+  - `absorcao`:      6–15 dias
+  - `basal`:         > 15 dias
+
+---
+
+## ESTADO ATUAL DOS DADOS
+
+### Arquivo de treino: `d.csv`
+Gerado por Isaque. Já passou por Data Input, Cleaning e Preprocessing.
+
+Schema (separador `;`):
+```
+banco_origem | dia | hora | dia_semana | total_dia | acumulado_ate_hora | proporcao_ate_hora |
+data_ultimo_batimento | dias_desde_ultimo_batimento | faixa_batimento
+```
+
+Estatísticas validadas:
+- 1.260 linhas · 130 dias úteis · período 2025-11-07 → 2026-05-07
+- Horas: 8–19 (dias úteis apenas, fim de semana removido)
+- Faixas: pos_batimento=22 dias, absorcao=28 dias, basal=80 dias
+- CONSUMER e AUTOS já incluídos como colunas separadas
+- NULLs em `data_ultimo_batimento` apenas para 45 dias basais antigos
+  → não afetam o modelo (faixa já está correta)
+
+### Derivação necessária antes do treino
+`d.csv` tem acumulado — o modelo precisa de **incremental por banda**:
+
+```python
+df = df.sort_values(['dia', 'hora'])
+df['acordos_banda'] = df.groupby('dia')['acumulado_ate_hora'].diff()
+df['acordos_banda'] = df['acordos_banda'].fillna(df['acumulado_ate_hora'])
+df['acordos_banda'] = df['acordos_banda'].astype(int)
+```
+
+---
+
+## MODELO FASE 1 — Mediana por banda (MVP)
+
+### O que é
+Tabela de lookup: `(hora, faixa_batimento)` → mediana histórica de acordos nessa banda.
+
+### Por que mediana e não média
+Outliers confirmados nos dados (ex: pos_batimento 17h tem mean=6.3 mas median=5.0).
+Mediana é robusta a dias atípicos. Sempre usar mediana neste modelo.
+
+### Código de treino
+```python
+import pandas as pd
+
+df = pd.read_csv('d.csv', sep=';', encoding='utf-8-sig',
+                 names=['banco_origem','dia','hora','dia_semana','total_dia',
+                        'acumulado_ate_hora','proporcao_ate_hora',
+                        'data_ultimo_batimento',
+                        'dias_desde_ultimo_batimento','faixa_batimento'])
+
+# Derivar incremental
+df = df.sort_values(['dia','hora'])
+df['acordos_banda'] = (df.groupby('dia')['acumulado_ate_hora']
+                         .diff()
+                         .fillna(df['acumulado_ate_hora'])
+                         .astype(int))
+
+# Separar holdout (últimos 20 dias úteis)
+dias_ordenados = sorted(df['dia'].unique())
+holdout_dias   = set(dias_ordenados[-20:])
+treino         = df[~df['dia'].isin(holdout_dias)]
+teste          = df[df['dia'].isin(holdout_dias)]
+
+# Treinar lookup
+lookup = (treino
+          .groupby(['hora', 'faixa_batimento'])['acordos_banda']
+          .median()
+          .round()
+          .astype(int)
+          .to_dict())
+```
+
+### Prevenção de overfitting
+- **Mediana sobre média**: reduz influência de outliers
+- **Holdout temporal**: últimos 20 dias fora do treino (nunca embaralhar — é série temporal)
+- **Sem hiperparâmetro**: lookup não tem parâmetro ajustável → não há o que overfit
+- **Mínimo de observações por célula**: todas as células têm ≥ 17 obs (validado)
+  → fallback não necessário, mas implementar por segurança:
+  ```python
+  # Se célula tiver < 10 obs, usar mediana global da hora
+  fallback = treino.groupby('hora')['acordos_banda'].median().to_dict()
+  def get_esperado(hora, faixa):
+      return lookup.get((hora, faixa), fallback[hora])
+  ```
+
+---
+
+## VALIDAÇÃO
+
+### Walk-forward (obrigatório para séries temporais)
+```
+Fold 1: treino dias 1–90   · teste dias 91–100
+Fold 2: treino dias 1–100  · teste dias 101–110
+Fold 3: treino dias 1–110  · teste dias 111–120
+Fold 4: treino dias 1–120  · teste dias 121–130  ← holdout final
+```
+Nunca usar dados futuros no treino. Shuffle é proibido aqui.
+
+### Métricas por fold
+
+```python
+# Para cada dia no conjunto de teste:
+erros = []
+for dia in teste['dia'].unique():
+    dia_df = teste[teste['dia'] == dia]
+    faixa  = dia_df['faixa_batimento'].iloc[0]
+    for _, row in dia_df.iterrows():
+        esperado = get_esperado(row['hora'], faixa)
+        real     = row['acordos_banda']
+        erros.append({
+            'hora': row['hora'],
+            'faixa': faixa,
+            'esperado': esperado,
+            'real': real,
+            'erro_abs': abs(real - esperado),
+            'erro_rel': abs(real - esperado) / max(real, 1)
+        })
+
+erros_df = pd.DataFrame(erros)
+```
+
+| Métrica | Fórmula | Threshold aceitável |
+|---|---|---|
+| MAE global | `mean(erro_abs)` | < 3 acordos por banda |
+| MAE por faixa | idem, separado | pos_batimento pode ser maior |
+| Acerto direcional | `% bandas com sinal(delta) correto` | > 60% |
+| Cobertura P25–P75 | `% real dentro do IQR histórico` | > 50% |
+
+### Interpretação humana (para o gestor)
+Traduzir resultado em linguagem operacional:
+```
+"Em 7 de cada 10 bandas horárias, o erro é de 3 acordos ou menos."
+```
+
+---
+
+## SERVING — Como o modelo roda em produção
+
+### Cache em memória (padrão do projeto)
+```python
+# Mesmo padrão do /produtividade-agentes
+_LOOKUP_CACHE: dict | None = None
+_LOOKUP_UPDATED: datetime | None = None
+_LOOKUP_TTL: int = 86400  # recalcula 1x/dia
+```
+
+### Faixa do dia atual
+```python
+# Consultar CARGA_LOTE para o último batimento
+ultimo_batimento = query_ultimo_batimento(db)  # retorna date
+dias_desde = (date.today() - ultimo_batimento).days
+if   dias_desde <= 5:  faixa = 'pos_batimento'
+elif dias_desde <= 15: faixa = 'absorcao'
+else:                  faixa = 'basal'
+```
+
+### Projeção em tempo real
+```python
+# Acumulado hoje até hora atual (query REC_MASTER)
+acumulado_hoje = query_acumulado_hoje(db, hora_atual)
+
+# Proporção histórica da hora atual (de d.csv / treino)
+proporcao = lookup_proporcao[(hora_atual, faixa)]
+projecao  = round(acumulado_hoje / proporcao) if proporcao > 0 else None
+```
+
+---
+
+## ENDPOINT
+
+```
+GET /dashboard/ritmo-dia/{db}
+```
+
+Parâmetros `{db}`: `COBwebRCBCONSUMER` · `COBwebRCBAUTOS` · `todos`
+
+Response:
+```json
+{
+  "meta": {
+    "generated_at": "ISO-8601",
+    "cache_age_seconds": 0,
+    "faixa_batimento": "basal",
+    "dias_desde_ultimo_batimento": 8
+  },
+  "data": {
+    "hora_atual": 11,
+    "acumulado_atual": 20,
+    "projecao_fechamento": 47,
+    "bandas": [
+      {
+        "hora": 8,
+        "esperado": 3,
+        "real": 2,
+        "delta": -1,
+        "status": "ok"
+      },
+      {
+        "hora": 9,
+        "esperado": 3,
+        "real": 5,
+        "delta": 2,
+        "status": "acima"
+      },
+      {
+        "hora": 10,
+        "esperado": 4,
+        "real": 1,
+        "delta": -3,
+        "status": "abaixo"
+      },
+      {
+        "hora": 11,
+        "esperado": 4,
+        "real": null,
+        "delta": null,
+        "status": "em_andamento"
+      }
+    ]
+  },
+  "errors": []
+}
+```
+
+Regra de `status`:
+- `"acima"`:        delta > 0
+- `"ok"`:           delta == 0
+- `"abaixo"`:       delta < 0
+- `"em_andamento"`: hora atual (banda ainda não fechou)
+- `"futuro"`:       hora > hora_atual
+
+---
+
+## CARD NO INDEX.TSX
+
+```
+┌──────────────────────────────────────┐
+│ Ritmo do Dia          basal · dia 8  │
+├──────────────────────────────────────┤
+│  8h   esp:3  real:2  delta:−1  🟡   │
+│  9h   esp:3  real:5  delta:+2  🟢   │
+│ 10h   esp:4  real:1  delta:−3  🔴   │
+│ 11h   esp:4  real:—  (agora)   ⏳   │
+├──────────────────────────────────────┤
+│ Projeção de fechamento: ~47 acordos  │
+│              → Ver análise completa  │
+└──────────────────────────────────────┘
+```
+
+---
+
+## ROADMAP DE MODELOS
+
+A interface nunca muda. Só o "esperado" fica mais preciso.
+
+| Fase | Modelo | Como melhora o esperado | Quando entra |
+|---|---|---|---|
+| **1 (agora)** | Mediana por banda | Baseline histórico por faixa | Implementar agora |
+| **2** | KNN | Busca dias com perfil similar ao início do dia atual | Quando MAE fase 1 não satisfizer |
+| **3** | Regressão | Features: dia_semana, sazonalidade, volume acumulado | Com MLflow para comparar experimentos |
+
+### Prevenção de overfitting nas fases futuras
+
+**KNN (fase 2):**
+- k mínimo = 5 (nunca memorizar dias individuais)
+- Features permitidas: `hora`, `dias_desde_batimento`, `dia_semana`, `acumulado_primeiras_2h`
+- Validação: walk-forward obrigatório, comparar MAE com fase 1 antes de promover
+
+**Regressão (fase 3):**
+- Regularização L2 (Ridge) para penalizar features desnecessárias
+- Sem features derivadas entre si (multicolinearidade)
+- MLflow para rastrear experimentos e comparar com KNN
+
+---
+
+## DECISÕES ABERTAS
+
+| # | Decisão | Status |
+|---|---|---|
+| 1 | CONSUMER / AUTOS / todos | ✅ ambos incluídos — 3 lookups |
+| 2 | Threshold de erro aceitável | ✅ MAE < 3 acordos/banda, acerto direcional > 60% |
+| 3 | Schema final de `d.csv` com colunas de banco | ✅ banco_origem adicionado como primeira coluna |
