@@ -100,9 +100,10 @@ print('=' * 62)
 dias_ord    = sorted(df['dia'].unique())
 N_DIAS      = len(dias_ord)
 FOLD_SIZE   = 10
-FOLD_STARTS = [90, 100, 110, 120]
+FOLD_STARTS = [N_DIAS - 40, N_DIAS - 30, N_DIAS - 20, N_DIAS - 10]
 
-assert N_DIAS == 130, f'Esperado 130 dias, encontrado {N_DIAS}'
+assert N_DIAS >= 50, f'Mínimo 50 dias para 4 folds, encontrado {N_DIAS}'
+print(f'N_DIAS={N_DIAS}  FOLD_STARTS={FOLD_STARTS}  FOLD_SIZE={FOLD_SIZE}')
 
 for i, fs in enumerate(FOLD_STARTS):
     d0 = pd.Timestamp(dias_ord[fs]).date()
