@@ -1,0 +1,103 @@
+==============================================================
+STEP 1 — DATA PREPARATION
+==============================================================
+NULLs imputados (dias_desde_batimento=30): 76
+Shape: (860, 14)  |  dias: 121  |  bancos: ['AUTOS', 'CONSUMER']
+acordos_banda — min:1  max:27  median:1.0
+
+==============================================================
+STEP 2 — SPLIT TEMPORAL
+==============================================================
+N_DIAS=121  FOLD_STARTS=[81, 91, 101, 111]  FOLD_SIZE=10
+  Fold 1: treino dias[0:81]  teste [2026-03-11 -> 2026-03-24]
+  Fold 2: treino dias[0:91]  teste [2026-03-25 -> 2026-04-08]
+  Fold 3: treino dias[0:101]  teste [2026-04-09 -> 2026-04-23]
+  Fold 4: treino dias[0:111]  teste [2026-04-24 -> 2026-05-08]
+
+==============================================================
+STEP 3 — K SELECTION (walk-forward folds 1–3)
+==============================================================
+            Fold1    Fold2    Fold3      Media
+------------------------------------------------
+Phase1       0.75     1.09     1.04       0.96
+------------------------------------------------
+k=5          0.86     1.38     0.94       1.06
+k=7          0.80     1.27     0.92       0.99
+k=10         0.75     1.22     0.99       0.99
+
+k selecionado: 10  (MAE médio folds 1-3: 0.99)
+
+==============================================================
+STEP 4 — FOLD 4 HOLDOUT (k=10)
+==============================================================
+Treino: 2025-11-11 -> 2026-04-23  (111 dias, 738 linhas)
+Teste:  2026-04-24 -> 2026-05-08  (10 dias, 122 linhas)
+
+Métrica                       Phase 1     KNN k=10      Delta
+--------------------------------------------------------------
+MAE global (acordos/banda)       1.88         1.52      -0.35
+Acerto direcional                   —        71.3%
+N obs                             122
+
+Faixa                     Phase 1        KNN      Delta
+------------------------------------------------------
+absorcao                     2.10       1.58      -0.52  n=31
+basal                        1.94       1.61      -0.33  n=79
+pos_batimento                0.92       0.83      -0.08  n=12
+
+Hora        Phase 1        KNN      Delta
+------------------------------------------
+8              2.14       0.86      -1.29  n=7
+9              2.00       1.44      -0.56  n=9
+10             1.67       1.27      -0.40  n=15
+11             2.46       2.15      -0.31  n=13
+12             1.09       1.09      +0.00  n=11
+13             2.23       1.92      -0.31  n=13
+14             2.38       2.00      -0.38  n=16
+15             2.07       1.80      -0.27  n=15
+16             1.33       1.25      -0.08  n=12
+17             1.33       0.78      -0.56  n=9
+18             0.50       1.00      +0.50  n=2
+
+==============================================================
+STEP 5 — RESUMO COMPARATIVO (todos os 4 folds)
+==============================================================
+Fold        Phase 1     KNN k=10      Delta   Status
+----------------------------------------------------
+1              0.75         0.75      +0.00     PIOR
+2              1.09         1.22      +0.13     PIOR
+3              1.04         0.99      -0.05       OK
+4              1.88         1.52      -0.35       OK
+----------------------------------------------------
+Global         1.19         1.12      -0.07
+
+==============================================================
+STEP 6 — EXPORT CSV VALIDAÇÃO
+==============================================================
+knn_phase2_validation.csv  (353 linhas, 4 folds, sem re-treino)
+
+==============================================================
+STEP 7 — SALVAR ARTEFATOS
+==============================================================
+knn_phase2_model.joblib   — KNN completo (130 dias, para deploy)
+knn_phase2_scaler.joblib  — StandardScaler (130 dias, para deploy)
+Features: ['hora', 'dias_desde_ultimo_batimento', 'dia_semana_sin', 'dia_semana_cos', 'acumulado_lag']
+k=10, metric=euclidean
+
+==============================================================
+STEP 8 — DECISÃO DE PROMOÇÃO
+==============================================================
+Critério 1 — MAE < 8.5:                OK      (MAE=1.52)
+Critério 2 — Melhora >= 10% vs Phase1: OK      (-18.8%)
+Critério 3 — Acerto direcional > 65%:  OK      (71.3%)
+Critério 4 — Nenhum fold pior:         FALHOU
+
+RESULTADO: MANTER Phase 1
+  Falhou: fold(s) pior que Phase 1
+
+  Próximos passos:
+    — banco_origem como feature binária (0=AUTOS, 1=CONSUMER)
+    — acumulado_primeiras_2h para horas >= 10
+    — aumentar janela de treino além dos 130 dias disponíveis
+
+Features: ['hora', 'dias_desde_ultimo_batimento', 'dia_semana_sin', 'dia_semana_cos', 'acumulado_lag']
