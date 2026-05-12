@@ -85,11 +85,25 @@ DS_MIN, DS_PERIOD = 2, 5
 df['dia_semana_sin'] = np.sin(2 * np.pi * (df['dia_semana'] - DS_MIN) / DS_PERIOD)
 df['dia_semana_cos'] = np.cos(2 * np.pi * (df['dia_semana'] - DS_MIN) / DS_PERIOD)
 
+# banco_origem binário: 0=AUTOS, 1=CONSUMER
+df['banco_bin'] = (df['banco_origem'] == 'COBwebRCBCONSUMER').astype(int)
+
+# acumulado_primeiras_2h: soma acordos_banda horas 8+9 do dia (por banco).
+# Hora 8,9 → 0 (não disponível ainda). Hora >=10 → valor real. Sem leakage.
+_early = (df[df['hora'].isin([8, 9])]
+          .groupby(['banco_origem', 'dia'])['acordos_banda']
+          .sum()
+          .rename('acumulado_primeiras_2h')
+          .reset_index())
+df = df.merge(_early, on=['banco_origem', 'dia'], how='left')
+df['acumulado_primeiras_2h'] = df['acumulado_primeiras_2h'].fillna(0).astype(int)
+df.loc[df['hora'] < 10, 'acumulado_primeiras_2h'] = 0
+
 print(f'Shape: {df.shape}  |  dias: {df["dia"].nunique()}  |  bancos: {sorted(df["banco_origem"].unique())}')
 print(f'acordos_banda — min:{df["acordos_banda"].min()}  max:{df["acordos_banda"].max()}  '
       f'median:{df["acordos_banda"].median():.1f}')
 
-FEATURES = ['hora', 'dias_desde_ultimo_batimento', 'dia_semana_sin', 'dia_semana_cos', 'acumulado_lag']
+FEATURES = ['hora', 'dias_desde_ultimo_batimento', 'dia_semana_sin', 'dia_semana_cos', 'acumulado_lag', 'banco_bin', 'acumulado_primeiras_2h']
 
 # ── STEP 2: SPLIT TEMPORAL ────────────────────────────────────────────────
 print()
@@ -145,7 +159,7 @@ print('=' * 62)
 print('STEP 3 — K SELECTION (walk-forward folds 1–3)')
 print('=' * 62)
 
-K_OPTS = [5, 7, 10]
+K_OPTS = [5, 7, 10, 15, 20]
 cv_knn = {k: [] for k in K_OPTS}
 cv_p1  = []
 
